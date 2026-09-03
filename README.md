@@ -1,6 +1,6 @@
 # ⚡ g-patcher
 
-Автоматический патчер для **Antigravity CLI (`agy`)**, снимающий ошибку региональных ограничений:
+Автоматический байт-патчер для **Antigravity CLI (`agy`)**, снимающий ошибку региональных ограничений:
 
 ```text
 Eligibility check failed: Your current account is not eligible for Antigravity, because it is not currently available in your location.
@@ -19,55 +19,57 @@ Eligibility check failed: Your current account is not eligible for Antigravity, 
 
 ---
 
-## 🚀 Быстрый старт (Автоматизация навсегда)
+## 🚀 Быстрый старт (Установка через симлинки)
 
-Чтобы патч накатывался **автоматически при каждом обновлении** `agy`:
+Установка связывает репозиторий с системой через **симлинки**, поэтому любые обновления кода (`git pull` или локальные правки) сразу применяются без повторной инсталляции:
 
 ```bash
 git clone git@github.com:petqa/g-patcher.git
 cd g-patcher
-chmod +x install.sh patch.py
+chmod +x install.sh uninstall.sh patch.py
 ./install.sh
 ```
 
-### Что делает инсталлер:
-1. Копирует скрипт в `~/.gemini/scripts/patch-agy.py`.
-2. Пропатчивает текущий бинарник `~/.local/bin/agy`.
-3. Создает системный сервис **macOS `launchd`** (`ru.petqa.agy-autopatch.plist`) с директивой `WatchPaths`. Как только `agy` обновляется (перезаписывается на диске), `launchd` мгновенно запускает патчер в фоне.
-4. Добавляет функцию-гард в `~/.zshrc`:
+### Что настраивает инсталлер:
+1. **Симлинки на скрипт:**
+   * `~/.local/bin/g-patcher` → `$REPO_DIR/patch.py` (утилита доступна глобально в терминале).
+   * `~/.gemini/scripts/patch-agy.py` → `$REPO_DIR/patch.py`.
+2. **Системный фоновый демон macOS (`launchd`):**
+   * Создает симлинк `~/Library/LaunchAgents/ru.petqa.agy-autopatch.plist` → `$REPO_DIR/ru.petqa.agy-autopatch.plist`.
+   * Следит через директиву `WatchPaths` за файлом `~/.local/bin/agy`.
+   * **Как только `agy` обновляется или перезаписывается**, `launchd` автоматически вызывает патчер в фоне за ~10 мс.
+3. **Функция-гард в `~/.zshrc`:**
    ```bash
    agy() {
-       ~/.gemini/scripts/patch-agy.py --silent 2>/dev/null
+       ~/.local/bin/g-patcher --silent 2>/dev/null
        command agy "$@"
    }
    ```
+   Страховка для интерактивного шелла: если вы только что обновили CLI и сразу запустили `agy`, бинарник проверяется прямо перед стартом.
 
 ---
 
-## 🛠 Ручной запуск
+## 🛠 Использование CLI (`g-patcher`)
 
-Если нужно просто разово пропатчить бинарник:
+После установки команда `g-patcher` доступна глобально:
 
 ```bash
-# Патч дефолтного бинарника (~/.local/bin/agy или из PATH)
-python3 patch.py
+# Проверить и пропатчить дефолтный бинарник (~/.local/bin/agy или из PATH)
+g-patcher
 
-# Патч произвольного пути к agy
-python3 patch.py /path/to/agy
+# Пропатчить конкретный файл
+g-patcher /path/to/agy
 
-# Тихий режим (для скриптов)
-python3 patch.py --silent
+# Тихий режим (для cron / скриптов)
+g-patcher --silent
 ```
 
 ---
 
-## 🔍 Проверка работы
+## 🧹 Удаление
 
-Выполните команду в терминале:
+Чтобы снять симлинки и выгрузить сервис `launchd`:
 
 ```bash
-agy --print "ping"
-# Ожидаемый ответ: pong! How can I help you today?
+./uninstall.sh
 ```
-
-Если ответ получен без ошибок `Eligibility check failed` — всё работает штатно!
