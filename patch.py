@@ -1,146 +1,199 @@
 #!/usr/bin/env python3
 """
-g-patcher: Автоматический байт-патчер для Antigravity CLI (agy).
-Снимает региональные ограничения ("Eligibility check failed: Your current account is not eligible for Antigravity...").
-Поддерживает macOS ARM64 (Apple Silicon) и x86_64 (Intel).
+g-patcher: Автоматический мульти-компонентный патчер для экосистемы Antigravity.
+Базируется на логике open-antigravity-patcher.
+
+Поддерживаемые компоненты:
+1. Antigravity CLI (agy)
+2. Antigravity 2.0 (language_server)
+3. Antigravity IDE (Electron main.js)
+4. Antigravity VS Code / Cursor Extension (extension.js)
 """
 
 import os
 import sys
-import re
-import shutil
-import subprocess
 
-DEFAULT_AGY_PATH = os.path.expanduser("~/.local/bin/agy")
+# Добавляем корень репозитория в sys.path для импорта модулей patcher
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+if REPO_DIR not in sys.path:
+    sys.path.insert(0, REPO_DIR)
 
-# ARM64 Gate:
-#   cbnz x1,error ; cbz x0,eligible ; ldrb w1,[x0,#8] ; tbnz w1,#0,eligible
-#   bl failure_builder
-# Подменяет ldrb w1,[x0,#8] (\x01\x20\x40\x39) на movz w1,#1 (\x21\x00\x80\x52)
-SIG_ARM64 = rb"...\xb5...\xb4\x01\x20\x40\x39...\x37"
-PAT_ARM64 = rb"...\xb5...\xb4\x21\x00\x80\x52...\x37"
-FIX_ARM64 = b"\x21\x00\x80\x52"
-OFFSET_ARM64 = 8
-
-# x86_64 Gate:
-#   test rax,rax ; je eligible ; cmp byte[rax+8],0 ; jne eligible ; call failure_builder
-# Подменяет cmp byte[rax+8],0 (\x80\x78\x08\x00) на test rax,rax; nop (\x48\x85\xc0\x90)
-SIG_X64 = rb"\x48\x85\xc0\x0f\x84....\x80\x78\x08\x00\x0f\x85...."
-PAT_X64 = rb"\x48\x85\xc0\x0f\x84....\x48\x85\xc0\x90\x0f\x85...."
-FIX_X64 = b"\x48\x85\xc0\x90"
-OFFSET_X64 = 9
+from patcher.agy.discovery import find_agy_binary, resolve_agy_path
+from patcher.agy.patcher import get_status as get_agy_status, do_patch_agy
+from patcher.manager.discovery import find_manager_binary, resolve_manager_path
+from patcher.manager.patcher import get_status as get_mgr_status, do_patch_manager
+from patcher.ide.discovery import find_install_root, find_main_js, resolve_target_path as resolve_ide_path
+from patcher.ide.patcher import is_already_patched as is_ide_patched, do_patch as do_patch_ide
+from patcher.vscode.discovery import find_extension_js, resolve_extension_path
+from patcher.vscode.patcher import is_already_patched as is_vscode_patched, do_patch_vscode
 
 
-def find_agy_binary():
-    # 1. PATH lookup
-    w = shutil.which("agy")
-    if w and os.path.isfile(w):
-        return os.path.abspath(w)
-
-    # 2. Стандартные пути
-    candidates = [
-        DEFAULT_AGY_PATH,
-        os.path.expanduser("~/bin/agy"),
-        "/usr/local/bin/agy",
-        "/opt/antigravity/bin/agy",
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return os.path.abspath(c)
-
-    return DEFAULT_AGY_PATH
+def print_status(component, path, status, silent=False):
+    if silent:
+        return
+    status_icon = "✓" if status == "patched" else ("✗" if status == "unpatched" else "?")
+    print(f"[{status_icon}] {component}: {status} ({path})")
 
 
-def patch_binary(path, silent=False):
-    if not os.path.isfile(path):
-        if not silent:
-            print(f"[!] Бинарник не найден: {path}", file=sys.stderr)
+def patch_component(name, path, get_status_fn, do_patch_fn, silent=False):
+    if not path or not os.path.exists(path):
         return False
 
-    with open(path, "rb") as f:
-        data = f.read()
+    status, _ = get_status_fn(path) if callable(get_status_fn) else (get_status_fn, None)
 
-    # Проверка ARM64
-    if re.search(PAT_ARM64, data, re.S):
+    if status == "patched":
         if not silent:
-            print(f"[*] {path} уже пропатчен (ARM64).")
+            print(f"[*] {name}: уже пропатчен ({path})")
         return True
-
-    matches_arm64 = list(re.finditer(SIG_ARM64, data, re.S))
-    if matches_arm64:
+    elif status == "unpatched":
         if not silent:
-            print(f"[*] Найдено {len(matches_arm64)} ARM64 eligibility gate(s). Патчим...")
-        bdata = bytearray(data)
-        for m in matches_arm64:
-            off = m.start() + OFFSET_ARM64
-            bdata[off : off + len(FIX_ARM64)] = FIX_ARM64
-
-        tmp_path = f"{path}.tmp.{os.getpid()}"
-        with open(tmp_path, "wb") as f:
-            f.write(bdata)
-        os.chmod(tmp_path, 0o755)
-        os.replace(tmp_path, path)
-
-        # Ad-hoc codesign на macOS обязателен после правки байтов
-        if sys.platform == "darwin":
-            subprocess.run(
-                ["codesign", "--force", "--sign", "-", path],
-                check=True,
-                capture_output=True,
-            )
-
+            print(f"[→] {name}: найден непопатченный ({path}), патчим...")
+        try:
+            do_patch_fn(path)
+            return True
+        except PermissionError:
+            if not silent:
+                print(f"[!] Недостаточно прав для {name} ({path}). Попробуйте: sudo g-patcher", file=sys.stderr)
+            return False
+        except Exception as e:
+            if not silent:
+                if "Operation not permitted" in str(e) or "Permission denied" in str(e):
+                    print(f"[!] Недостаточно прав для {name} ({path}). Попробуйте: sudo g-patcher", file=sys.stderr)
+                else:
+                    print(f"[!] Ошибка патча {name}: {e}", file=sys.stderr)
+            return False
+    else:
         if not silent:
-            print(f"[+] Успешно пропатчен и переподписан: {path} (ARM64)")
-        return True
+            print(f"[?] {name}: неизвестный статус ({path})")
+        return False
 
-    # Проверка x86_64
-    if re.search(PAT_X64, data, re.S):
-        if not silent:
-            print(f"[*] {path} уже пропатчен (x86_64).")
-        return True
 
-    matches_x64 = list(re.finditer(SIG_X64, data, re.S))
-    if matches_x64:
-        if not silent:
-            print(f"[*] Найдено {len(matches_x64)} x86_64 eligibility gate(s). Патчим...")
-        bdata = bytearray(data)
-        for m in matches_x64:
-            off = m.start() + OFFSET_X64
-            bdata[off : off + len(FIX_X64)] = FIX_X64
+def run_auto_patch(silent=False):
+    found_any = False
 
-        tmp_path = f"{path}.tmp.{os.getpid()}"
-        with open(tmp_path, "wb") as f:
-            f.write(bdata)
-        os.chmod(tmp_path, 0o755)
-        os.replace(tmp_path, path)
+    # 1. Antigravity CLI (agy)
+    agy = find_agy_binary()
+    if agy and os.path.isfile(agy):
+        found_any = True
+        patch_component("Antigravity CLI (agy)", agy, get_agy_status, do_patch_agy, silent=silent)
 
-        if sys.platform == "darwin":
-            subprocess.run(
-                ["codesign", "--force", "--sign", "-", path],
-                check=True,
-                capture_output=True,
-            )
+    # 2. Antigravity 2.0 (language_server)
+    mgr = find_manager_binary()
+    if mgr and os.path.isfile(mgr):
+        found_any = True
+        patch_component("Antigravity 2.0 (language_server)", mgr, get_mgr_status, do_patch_manager, silent=silent)
 
-        if not silent:
-            print(f"[+] Успешно пропатчен и переподписан: {path} (x86_64)")
-        return True
+    # 3. Antigravity IDE (main.js)
+    ide_root = find_install_root()
+    ide_main = find_main_js(ide_root) if ide_root else ""
+    if ide_main and os.path.isfile(ide_main):
+        found_any = True
+        def get_ide_status_wrapper(p):
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            return "patched" if is_ide_patched(content) else "unpatched"
+        patch_component("Antigravity IDE (main.js)", ide_main, get_ide_status_wrapper, do_patch_ide, silent=silent)
 
-    if not silent:
-        print("[!] Сигнатура проверки региона не найдена (неподдерживаемый билд?).", file=sys.stderr)
-    return False
+    # 4. Antigravity VS Code Extension
+    ext_js = find_extension_js()
+    if ext_js and os.path.isfile(ext_js):
+        found_any = True
+        def get_vscode_status_wrapper(p):
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            return "patched" if is_vscode_patched(content) else "unpatched"
+        patch_component("VS Code Extension", ext_js, get_vscode_status_wrapper, do_patch_vscode, silent=silent)
+
+    if not found_any and not silent:
+        print("[!] Компоненты Antigravity не найдены в стандартных путях системы.")
+
+
+def run_status_check():
+    print("==> Проверка компонентов Antigravity в системе:\n")
+
+    # CLI
+    agy = find_agy_binary()
+    if agy:
+        st, _ = get_agy_status(agy)
+        print_status("Antigravity CLI (agy)", agy, st)
+    else:
+        print("[-] Antigravity CLI (agy): не найден")
+
+    # Manager
+    mgr = find_manager_binary()
+    if mgr:
+        st, _ = get_mgr_status(mgr)
+        print_status("Antigravity 2.0 (language_server)", mgr, st)
+    else:
+        print("[-] Antigravity 2.0 (language_server): не найден")
+
+    # IDE
+    ide_root = find_install_root()
+    ide_main = find_main_js(ide_root) if ide_root else ""
+    if ide_main:
+        with open(ide_main, "r", encoding="utf-8", errors="ignore") as f:
+            st = "patched" if is_ide_patched(f.read()) else "unpatched"
+        print_status("Antigravity IDE (main.js)", ide_main, st)
+    else:
+        print("[-] Antigravity IDE (main.js): не найден")
+
+    # VS Code Extension
+    ext_js = find_extension_js()
+    if ext_js:
+        with open(ext_js, "r", encoding="utf-8", errors="ignore") as f:
+            st = "patched" if is_vscode_patched(f.read()) else "unpatched"
+        print_status("VS Code Extension", ext_js, st)
+    else:
+        print("[-] VS Code Extension: не найдено")
+
+
+def main():
+    args = sys.argv[1:]
+    silent = "--silent" in args or "-q" in args
+
+    if "--status" in args or "-s" in args:
+        run_status_check()
+        return
+
+    if "--interactive" in args or "-i" in args:
+        from patcher.cli import run_cli
+        run_cli()
+        return
+
+    # Если указан конкретный путь:
+    custom_target = None
+    for a in args:
+        if not a.startswith("-"):
+            custom_target = os.path.abspath(os.path.expanduser(a))
+            break
+
+    if custom_target:
+        if not os.path.exists(custom_target):
+            print(f"[!] Файл или каталог не найден: {custom_target}", file=sys.stderr)
+            sys.exit(1)
+
+        # Авто-определение типа цели
+        name = os.path.basename(custom_target).lower()
+        if name.startswith("agy") or name.startswith("antigravity"):
+            do_patch_agy(custom_target)
+        elif name.startswith("language_server"):
+            do_patch_manager(custom_target)
+        elif name == "main.js" or custom_target.endswith(".app"):
+            resolved = resolve_ide_path(custom_target)
+            if resolved:
+                do_patch_ide(resolved)
+            else:
+                print(f"[!] Не удалось найти main.js в {custom_target}", file=sys.stderr)
+        elif name == "extension.js":
+            do_patch_vscode(custom_target)
+        else:
+            # Пробуем как agy бинарник
+            do_patch_agy(custom_target)
+        return
+
+    # По умолчанию — сканируем и патчим все обнаруженные компоненты
+    run_auto_patch(silent=silent)
 
 
 if __name__ == "__main__":
-    silent = "--silent" in sys.argv or "-q" in sys.argv
-    target = None
-
-    for arg in sys.argv[1:]:
-        if not arg.startswith("-"):
-            target = os.path.abspath(os.path.expanduser(arg))
-            break
-
-    if not target:
-        target = find_agy_binary()
-
-    success = patch_binary(target, silent=silent)
-    sys.exit(0 if success else 1)
+    main()

@@ -3,44 +3,50 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH_SCRIPT="$SCRIPT_DIR/patch.py"
-GEMINI_LINK="$HOME/.gemini/scripts/patch-agy.py"
-BIN_LINK="$HOME/.local/bin/g-patcher"
-PLIST_LABEL="ru.petqa.agy-autopatch"
-PLIST_LOCAL="$SCRIPT_DIR/${PLIST_LABEL}.plist"
-PLIST_LINK="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
-AGY_BIN="${1:-$HOME/.local/bin/agy}"
+BIN_DIR="$HOME/.local/bin"
+BIN_LINK="$BIN_DIR/g-patcher"
+PLIST_LABEL="com.antigravity.autopatch"
+PLIST_FILE="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
-echo "==> Установка g-patcher (через симлинки)..."
+echo "==> Установка g-patcher для пользователя: $(whoami)..."
 
 # 1. Права на исполнение
 chmod +x "$PATCH_SCRIPT"
 
-# 2. Создание симлинков на скрипт патчера
-mkdir -p "$HOME/.gemini/scripts"
-mkdir -p "$HOME/.local/bin"
-
-ln -sf "$PATCH_SCRIPT" "$GEMINI_LINK"
-echo "  [✓] Симлинк создан: $GEMINI_LINK -> $PATCH_SCRIPT"
-
+# 2. Создание глобального симлинка в PATH
+mkdir -p "$BIN_DIR"
 ln -sf "$PATCH_SCRIPT" "$BIN_LINK"
 echo "  [✓] Симлинк в PATH: $BIN_LINK -> $PATCH_SCRIPT"
 
-# 3. Патчим текущий бинарник agy (если он существует)
-if [ -f "$AGY_BIN" ]; then
-    echo "  [→] Проверка и патч текущего бинарника: $AGY_BIN"
-    python3 "$PATCH_SCRIPT" "$AGY_BIN"
-else
-    echo "  [i] Бинарник $AGY_BIN не найден, пропуск начального патча."
-fi
+# Симлинк для gemini scripts (обратная совместимость)
+mkdir -p "$HOME/.gemini/scripts"
+ln -sf "$PATCH_SCRIPT" "$HOME/.gemini/scripts/patch-agy.py"
 
-# 4. Настройка launchd через симлинк на plist (только для macOS)
+# 3. Запуск авто-патча прямо сейчас (находит все компоненты в системе)
+echo "  [→] Сканирование и патч компонентов Antigravity в системе..."
+python3 "$PATCH_SCRIPT" || true
+
+# 4. Настройка launchd через WatchPaths (только для macOS)
 if [ "$(uname)" = "Darwin" ]; then
     echo "  [→] Настройка фонового демона macOS launchd (WatchPaths)..."
     mkdir -p "$HOME/Library/LaunchAgents"
     mkdir -p "$HOME/.gemini/antigravity-cli/log"
 
-    # Генерируем plist в папке репозитория
-    cat <<EOF > "$PLIST_LOCAL"
+    # Собираем список путей для отслеживания
+    WATCH_PATHS=()
+    [ -f "$HOME/.local/bin/agy" ] && WATCH_PATHS+=("$HOME/.local/bin/agy")
+    [ -f "/Applications/Antigravity.app/Contents/Resources/bin/language_server" ] && WATCH_PATHS+=("/Applications/Antigravity.app/Contents/Resources/bin/language_server")
+
+    if [ ${#WATCH_PATHS[@]} -eq 0 ]; then
+        WATCH_PATHS+=("$HOME/.local/bin/agy")
+    fi
+
+    WATCH_XML=""
+    for wp in "${WATCH_PATHS[@]}"; do
+        WATCH_XML="${WATCH_XML}        <string>${wp}</string>\n"
+    done
+
+    cat <<EOF > "$PLIST_FILE"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -50,13 +56,12 @@ if [ "$(uname)" = "Darwin" ]; then
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>${GEMINI_LINK}</string>
+        <string>${BIN_LINK}</string>
         <string>--silent</string>
     </array>
     <key>WatchPaths</key>
     <array>
-        <string>${AGY_BIN}</string>
-    </array>
+$(printf "$WATCH_XML")    </array>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
@@ -67,19 +72,15 @@ if [ "$(uname)" = "Darwin" ]; then
 </plist>
 EOF
 
-    # Симлинкаем plist в LaunchAgents
-    ln -sf "$PLIST_LOCAL" "$PLIST_LINK"
-    echo "  [✓] Симлинк plist: $PLIST_LINK -> $PLIST_LOCAL"
-
-    launchctl unload "$PLIST_LINK" 2>/dev/null || true
-    launchctl load "$PLIST_LINK"
+    launchctl unload "$PLIST_FILE" 2>/dev/null || true
+    launchctl load "$PLIST_FILE"
     echo "  [✓] LaunchAgent запущен: $PLIST_LABEL"
 fi
 
 # 5. Функция-гард в ~/.zshrc
 ZSHRC="$HOME/.zshrc"
 if [ -f "$ZSHRC" ]; then
-    if ! grep -q "patch-agy.py" "$ZSHRC" && ! grep -q "g-patcher" "$ZSHRC"; then
+    if ! grep -q "g-patcher" "$ZSHRC"; then
         echo "  [→] Добавление функции agy в $ZSHRC..."
         cat <<'EOF' >> "$ZSHRC"
 
@@ -89,12 +90,11 @@ agy() {
     command agy "$@"
 }
 EOF
-        echo "  [✓] Функция добавлена в $ZSHRC"
+        echo "  [✓] Функция agy добавлена в $ZSHRC"
     else
         echo "  [✓] Функция agy уже настроена в $ZSHRC"
     fi
 fi
 
 echo ""
-echo "🎉 Установка через симлинки успешно завершена!"
-echo "Теперь любые изменения в $SCRIPT_DIR сразу активны в системе."
+echo "🎉 Установка успешно завершена для пользователя $(whoami)!"

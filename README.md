@@ -1,27 +1,29 @@
 # ⚡ g-patcher
 
-Автоматический байт-патчер для **Antigravity CLI (`agy`)**, снимающий ошибку региональных ограничений:
+Универсальный автоматический патчер для экосистемы **Google Antigravity**, снимающий ошибку региональных ограничений:
 
 ```text
 Eligibility check failed: Your current account is not eligible for Antigravity, because it is not currently available in your location.
 ```
 
+Ядро и байтовые сигнатуры основаны на опенсорсном проекте [open-antigravity-patcher](https://github.com/AvenCores/open-antigravity-patcher).
+
 ---
 
-## 💡 Как это работает
+## 📦 Поддерживаемые компоненты
 
-Внутри скомпилированного Go-бинаря `agy` зашита проверка региона (`isEligible`). 
-Патчер находит байтовую сигнатуру машинного кода и подменяет инструкцию ветвления:
+`g-patcher` автоматически находит и патчит всё, что установлено в системе:
 
-* **ARM64 (Apple Silicon):** `ldrb w1, [x0, #8]` (`\x01\x20\x40\x39`) заменяется на `movz w1, #1` (`\x21\x00\x80\x52`), заставляя проверку всегда возвращать `true`.
-* **x86_64 (Intel):** `cmp byte [rax+8], 0` заменяется на `test rax, rax; nop`.
-* **macOS Ad-hoc Code Signing:** после модификации бинарника накладывается ad-hoc цифровая подпись (`codesign --force --sign -`), предотвращая аварийное завершение процесса ядром macOS.
+1. **Antigravity CLI (`agy`)** — машинный байт-патч проверки `isEligible` (ARM64 / x86_64) + ad-hoc `codesign`.
+2. **Antigravity 2.0 (`language_server`)** — байт-патч `hasValidAuth=true` бинарника языкового сервера внутри приложения `Antigravity.app`.
+3. **Antigravity IDE (`main.js`)** — Electron-патч `isGoogleInternal -> true` + очистка кэша + переподпись бандла.
+4. **VS Code / Cursor / Windsurf Extensions** — патч `extension.js` (отключение сброса бинарника и проверки каналов) + патч встроенных бинарников.
 
 ---
 
 ## 🚀 Быстрый старт (Установка через симлинки)
 
-Установка связывает репозиторий с системой через **симлинки**, поэтому любые обновления кода (`git pull` или локальные правки) сразу применяются без повторной инсталляции:
+Установка привязывает репозиторий к системе через **симлинки**, динамически настраивая пути для текущего пользователя:
 
 ```bash
 git clone git@github.com:petqa/g-patcher.git
@@ -30,37 +32,45 @@ chmod +x install.sh uninstall.sh patch.py
 ./install.sh
 ```
 
-### Что настраивает инсталлер:
-1. **Симлинки на скрипт:**
-   * `~/.local/bin/g-patcher` → `$REPO_DIR/patch.py` (утилита доступна глобально в терминале).
-   * `~/.gemini/scripts/patch-agy.py` → `$REPO_DIR/patch.py`.
-2. **Системный фоновый демон macOS (`launchd`):**
-   * Создает симлинк `~/Library/LaunchAgents/ru.petqa.agy-autopatch.plist` → `$REPO_DIR/ru.petqa.agy-autopatch.plist`.
-   * Следит через директиву `WatchPaths` за файлом `~/.local/bin/agy`.
-   * **Как только `agy` обновляется или перезаписывается**, `launchd` автоматически вызывает патчер в фоне за ~10 мс.
-3. **Функция-гард в `~/.zshrc`:**
+### Что делает инсталлер:
+1. **Глобальная команда в PATH:** создаёт симлинк `~/.local/bin/g-patcher` на скрипт репозитория.
+2. **Автоматическое сканирование:** сразу же проверяет и патчит все установленные компоненты.
+3. **Системный фоновый демон macOS (`launchd`):**
+   * Создаёт LaunchAgent `~/Library/LaunchAgents/com.antigravity.autopatch.plist` с директивой `WatchPaths`.
+   * Отслеживает изменения бинарников (`~/.local/bin/agy`, `language_server` и др.).
+   * **При любом обновлении бинарников** демон мгновенно накатывает патч в фоне за 10 мс.
+4. **Страховка в `~/.zshrc`:**
    ```bash
    agy() {
        ~/.local/bin/g-patcher --silent 2>/dev/null
        command agy "$@"
    }
    ```
-   Страховка для интерактивного шелла: если вы только что обновили CLI и сразу запустили `agy`, бинарник проверяется прямо перед стартом.
 
 ---
 
 ## 🛠 Использование CLI (`g-patcher`)
 
-После установки команда `g-patcher` доступна глобально:
+После установки команда `g-patcher` доступна из любого места:
 
 ```bash
-# Проверить и пропатчить дефолтный бинарник (~/.local/bin/agy или из PATH)
+# Проверить статус всех компонентов (что установлено и пропатчено)
+g-patcher --status
+
+# Автоматически пропатчить все найденные компоненты
 g-patcher
 
-# Пропатчить конкретный файл
-g-patcher /path/to/agy
+# Для компонентов в /Applications (если требуется root):
+sudo g-patcher
 
-# Тихий режим (для cron / скриптов)
+# Открыть оригинальное интерактивное TUI-меню из апстрима:
+g-patcher -i
+
+# Пропатчить конкретный файл или приложение:
+g-patcher /path/to/agy
+g-patcher /Applications/Antigravity.app
+
+# Тихий режим (для cron / скриптов):
 g-patcher --silent
 ```
 
@@ -68,7 +78,7 @@ g-patcher --silent
 
 ## 🧹 Удаление
 
-Чтобы снять симлинки и выгрузить сервис `launchd`:
+Чисто выгружает сервис `launchd`, удаляет симлинки и убирает функции из `~/.zshrc`:
 
 ```bash
 ./uninstall.sh

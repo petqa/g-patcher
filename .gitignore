@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
 *.tmp.*
+*.agybak
+*.vscodebak
+*.plist
 .DS_Store
