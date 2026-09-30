@@ -109,10 +109,20 @@ CLI_GATE_ARM64 = Gate(
     offset=8,
     desc="eligibility screen off (arm64)",
 )
+# arm64, agy 1.2.14+: тот же гейт, но компилятор взял w2 вместо w1
+# (ldrb w2,[x0,#8] ; tbnz w2,#0,eligible), патч — mov w2,#1.
+CLI_GATE_ARM64_W2 = Gate(
+    rb"...\xb5...\xb4\x02\x20\x40\x39...\x37",
+    rb"...\xb5...\xb4\x22\x00\x80\x52...\x37",
+    b"\x22\x00\x80\x52",
+    offset=8,
+    desc="eligibility screen off (arm64, w2)",
+)
 
 CLI_GATE = MultiGate(
     CLI_GATE_X64,
     CLI_GATE_ARM64,
+    CLI_GATE_ARM64_W2,
     desc="eligibility screen off",
 )
 

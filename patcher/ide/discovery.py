@@ -1,10 +1,21 @@
 import os
+import re
 import sys
 import json
 import subprocess
 import string
 from enum import Enum
-from packaging.version import Version
+try:
+    from packaging.version import Version
+except ImportError:
+    # launchd запускает /usr/bin/python3, где packaging нет
+    class Version:
+        def __init__(self, v):
+            self.raw = str(v)
+            self.parts = [int(x) for x in re.findall(r'\d+', self.raw)]
+        def __ge__(self, other):
+            o_parts = other.parts if isinstance(other, Version) else [int(x) for x in re.findall(r'\d+', str(other))]
+            return self.parts >= o_parts
 from patcher.constants import AG_REGISTRY_SUBKEY, MIN_AG_VERSION
 from patcher.utils.file import get_posix_invoking_user_home
 from patcher.utils.console import ok
